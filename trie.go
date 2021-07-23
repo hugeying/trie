@@ -53,6 +53,15 @@ func (t *Trie) Root() *Node {
 // is stored as `interface{}` and must be type cast by
 // the caller.
 func (t *Trie) Add(key string, meta interface{}) *Node {
+	return t.add(key, meta, nil)
+}
+
+func (t *Trie) AddOrReplace(key string, meta interface{}, fn func(interface{}) bool) *Node {
+	return t.add(key, meta, fn)
+}
+
+func (t *Trie) add(key string, meta interface{}, fn func(interface{}) bool) *Node {
+
 	t.mu.Lock()
 
 	t.size++
@@ -72,7 +81,7 @@ func (t *Trie) Add(key string, meta interface{}) *Node {
 		}
 		node.termCount++
 	}
-	node = node.NewChild(nul, key, 0, meta, true)
+	node = node.NewOrAppendChild(nul, key, 0, meta, true, fn)
 	t.mu.Unlock()
 
 	return node
@@ -103,12 +112,18 @@ func (t *Trie) HasKeysWithPrefix(key string) bool {
 // all bitmasks up to root are appropriately recalculated.
 func (t *Trie) Remove(key string) {
 	var (
-		i    int
-		rs   = []rune(key)
 		node = findNode(t.Root(), []rune(key))
 	)
 	t.mu.Lock()
+	t.remove(key, node)
+	t.mu.Unlock()
+}
 
+func (t *Trie) remove(key string, node *Node) {
+	var (
+		i  int
+		rs = []rune(key)
+	)
 	t.size--
 	for n := node.Parent(); n != nil; n = n.Parent() {
 		i++
@@ -117,6 +132,31 @@ func (t *Trie) Remove(key string) {
 			n.RemoveChild(r)
 			break
 		}
+	}
+}
+
+func (t *Trie) RemoveDate(key string, fn func(interface{}) bool) {
+	var (
+		node = findNode(t.Root(), []rune(key))
+	)
+	t.mu.Lock()
+
+	if node == nil || node.children == nil {
+		return
+	}
+
+	dataNode := node.children[nul]
+	vs := dataNode.meta.([]interface{})
+	keep := make([]interface{}, 0, len(vs)-1)
+	for _, v := range vs {
+		if !fn(v) {
+			keep = append(keep, v)
+		}
+	}
+	if len(keep) == 0 {
+		t.remove(key, node)
+	} else {
+		dataNode.meta = keep
 	}
 	t.mu.Unlock()
 }
@@ -150,6 +190,49 @@ func (t Trie) PrefixSearch(pre string) []string {
 // Creates and returns a pointer to a new child for the node.
 func (parent *Node) NewChild(val rune, path string, bitmask uint64, meta interface{}, term bool) *Node {
 	node := &Node{
+		val:      val,
+		path:     path,
+		mask:     bitmask,
+		term:     term,
+		meta:     meta,
+		parent:   parent,
+		children: make(map[rune]*Node),
+		depth:    parent.depth + 1,
+	}
+	parent.children[node.val] = node
+	parent.mask |= bitmask
+	return node
+}
+
+func (parent *Node) NewOrAppendChild(val rune, path string, bitmask uint64, meta interface{}, term bool, fn func(interface{}) bool) *Node {
+	var node *Node
+	var ok bool
+
+	if val == nul {
+		node, ok = parent.children[val]
+		if ok {
+			list := node.meta.([]interface{})
+			if fn != nil {
+				var isExist bool
+				for i, v := range list {
+					if fn(v) {
+						list[i] = meta
+						isExist = true
+						break
+					}
+				}
+				if !isExist {
+					list = append(list, meta)
+				}
+			} else {
+				list = append(list, meta)
+			}
+			node.meta = list
+			return node
+		}
+		meta = []interface{}{meta}
+	}
+	node = &Node{
 		val:      val,
 		path:     path,
 		mask:     bitmask,
